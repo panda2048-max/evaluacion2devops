@@ -172,7 +172,7 @@ kubectl -n vehiculos port-forward svc/ms-vehiculos 8080:80
 
 | Herramienta | Uso | Validación realizada por el equipo |
 |---|---|---|
-| Claude Code (Anthropic, modelo Claude Opus 5.5) | Apoyo en la generación inicial de Dockerfile, docker-compose, manifiestos Kubernetes, workflow de GitHub Actions, pruebas del controller y estructura de este README | _describir qué revisaron, probaron o modificaron_ |
+| Claude Code (Anthropic, modelo Claude Opus 5.5) | Apoyo en la generación inicial de Dockerfile, docker-compose, manifiestos Kubernetes, workflow de GitHub Actions, pruebas del controller y estructura de este README |Revision de contenido de readme,configuracion de Snyk,revision de workflows|
 
 Cita según <https://bibliotecas.duoc.cl/ia>: _completar con el formato de la biblioteca_.
 
