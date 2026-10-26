@@ -1,0 +1,386 @@
+name: CI/CD ms-vehiculos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Minimo privilegio por defecto; cada job pide solo lo que necesita
+permissions:
+  contents: read
+
+# Si llega un push nuevo a la misma rama, se cancela la ejecucion anterior
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_DIR: ms-vehiculos
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ms-vehiculos
+  JAVA_VERSION: "21"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Integracion continua: compilacion, pruebas automatizadas y cobertura
+  # ---------------------------------------------------------------------------
+  test:
+    name: 1. Tests y cobertura
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      # verify = compilar + tests (JUnit/Mockito/MockMvc) + reporte JaCoCo + umbral de cobertura (80%)
+      - name: Ejecutar pruebas y verificar cobertura
+        run: |
+          chmod +x mvnw
+          ./mvnw -B verify | tee maven.log
+
+      - name: Resumen de calidad
+        if: always()
+        run: |
+          TESTS=$(grep -E "Tests run:.*Skipped: [0-9]+$" maven.log | tail -1 | sed 's/\[INFO\] //;s/\[ERROR\] //')
+          {
+            echo "## Calidad - commit \`${GITHUB_SHA::7}\`"
+            echo "- Pruebas: ${TESTS:-sin datos}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f target/site/jacoco/jacoco.csv ]; then
+            awk -F, 'NR>1 {m+=$8; c+=$9} END {printf "- Cobertura de lineas: %.1f%% (minimo exigido 80%%)\n", 100*c/(m+c)}' \
+              target/site/jacoco/jacoco.csv >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Publicar reportes de pruebas y cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-calidad-${{ github.sha }}
+          path: |
+            ${{ env.APP_DIR }}/target/surefire-reports/
+            ${{ env.APP_DIR }}/target/site/jacoco/
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 2. Seguridad: dependencias (SCA) y codigo fuente (SAST) con Snyk.
+  #    Si se encuentran vulnerabilidades de severidad alta o critica el job falla
+  #    y BLOQUEA la construccion/publicacion de la imagen y el despliegue.
+  # ---------------------------------------------------------------------------
+  security:
+    name: 2. Seguridad (Snyk)
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # publicar resultados en la pestana Security (SARIF)
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - uses: snyk/actions/setup@master
+
+      - name: Verificar que existe el secret SNYK_TOKEN
+        run: |
+          if [ -z "$SNYK_TOKEN" ]; then
+            echo "::error::Falta el secret SNYK_TOKEN (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+
+      - name: Escaneo de dependencias (Snyk Open Source)
+        id: sca
+        run: snyk test --file=pom.xml --severity-threshold=high --sarif-file-output=snyk-deps.sarif
+
+      - name: Analisis estatico de codigo (Snyk Code)
+        id: sast
+        if: always() && steps.sca.outcome != 'skipped'
+        run: snyk code test --severity-threshold=high --sarif-file-output=snyk-code.sarif
+
+      - name: Subir resultados a GitHub Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.APP_DIR }}
+          category: snyk
+
+      # Alertas continuas: Snyk vuelve a revisar el proyecto y avisa por correo
+      # cuando se publica una vulnerabilidad nueva en alguna dependencia.
+      - name: Registrar proyecto en Snyk para monitoreo continuo
+        if: success() && github.event_name == 'push'
+        run: snyk monitor --file=pom.xml --project-name=ms-vehiculos --target-reference=${{ github.sha }}
+
+  # ---------------------------------------------------------------------------
+  # 3. Contenedor: build de la imagen, escaneo de la imagen y publicacion en GHCR
+  # ---------------------------------------------------------------------------
+  docker:
+    name: 3. Imagen Docker
+    needs: security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ env.IMAGE_NAME }}:sha-${{ steps.vars.outputs.short_sha }}
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Construir imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          load: true
+          push: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:sha-${{ steps.vars.outputs.short_sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            VERSION=sha-${{ steps.vars.outputs.short_sha }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.build_date }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: snyk/actions/setup@master
+
+      # Bloqueo: una vulnerabilidad critica en la imagen (SO base o JRE) detiene el pipeline
+      - name: Escaneo de la imagen (Snyk Container)
+        run: |
+          snyk container test "${IMAGE_NAME}:sha-${{ steps.vars.outputs.short_sha }}" \
+            --file=${APP_DIR}/Dockerfile --severity-threshold=critical
+
+      - name: Login en GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publicar imagen
+        id: push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push --all-tags "$IMAGE_NAME"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_NAME}:sha-${{ steps.vars.outputs.short_sha }}" | cut -d@ -f2)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Imagen publicada"
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Imagen | \`${IMAGE_NAME}:sha-${{ steps.vars.outputs.short_sha }}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+            echo "| Commit | ${{ github.sha }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 4. Despliegue automatico en entorno simulado "staging" con Docker Compose
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: 4. Deploy staging (Docker Compose)
+    needs: docker
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: staging
+      url: http://localhost:9004/swagger-ui.html
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    env:
+      IMAGE: ${{ needs.docker.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Credenciales efimeras generadas en cada ejecucion: nunca quedan en el repo
+      - name: Generar .env del entorno
+        run: |
+          {
+            echo "DB_USERNAME=vehiculos"
+            echo "DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DB_ROOT_PASSWORD=$(openssl rand -hex 16)"
+            echo "APP_PORT=9004"
+          } > .env
+
+      - name: Levantar servicios (espera a que esten healthy)
+        run: docker compose up -d --no-build --wait --wait-timeout 240
+
+      - name: Pruebas de humo sobre el despliegue
+        run: |
+          set -e
+          BASE=http://localhost:9004
+          curl -fsS $BASE/actuator/health | tee /dev/stderr | grep -q '"UP"'
+          curl -fsS -X POST $BASE/api/v1/vehiculos -H 'Content-Type: application/json' \
+            -d '{"patente":"CICD01","marca":"Toyota","modelo":"Yaris","anio":2022,"color":"Gris","tipo":"Sedan","disponible":true}'
+          curl -fsS $BASE/api/v1/vehiculos | grep -q CICD01
+          test "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/v1/vehiculos/99999)" = "404"
+          echo "Pruebas de humo OK"
+
+      - name: Estado del entorno
+        if: always()
+        run: |
+          docker compose ps
+          docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' $(docker compose ps -q app)
+
+      - name: Logs en caso de fallo
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Bajar entorno
+        if: always()
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  # 5. Despliegue automatico en "produccion" simulada: cluster Kubernetes (kind)
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: 5. Deploy produccion (Kubernetes)
+    needs: [docker, deploy-staging]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: production
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    env:
+      IMAGE: ${{ needs.docker.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Crear cluster Kubernetes (kind)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: vehiculos
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cargar en el cluster la imagen publicada
+        run: |
+          docker pull "$IMAGE"
+          kind load docker-image "$IMAGE" --name vehiculos
+
+      - name: Instalar metrics-server (necesario para el HPA)
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+      - name: Crear namespace y Secret de base de datos
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl -n vehiculos create secret generic vehiculos-db \
+            --from-literal=DB_USERNAME=vehiculos \
+            --from-literal=DB_PASSWORD="$(openssl rand -hex 16)" \
+            --from-literal=DB_ROOT_PASSWORD="$(openssl rand -hex 16)"
+
+      - name: Desplegar manifiestos con la imagen de este commit
+        run: |
+          sed -i "s|newName: .*|newName: ${IMAGE%:*}|; s|newTag: .*|newTag: ${IMAGE##*:}|" k8s/kustomization.yaml
+          kubectl apply -k k8s/
+          kubectl -n vehiculos annotate deployment ms-vehiculos --overwrite \
+            kubernetes.io/change-cause="commit ${GITHUB_SHA} - run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          kubectl -n vehiculos rollout status statefulset/mysql --timeout=300s
+          kubectl -n vehiculos rollout status deployment/ms-vehiculos --timeout=300s
+
+      - name: Pruebas de humo en Kubernetes
+        run: |
+          kubectl -n vehiculos port-forward svc/ms-vehiculos 8080:80 &
+          sleep 5
+          curl -fsS http://localhost:8080/actuator/health | grep -q '"UP"'
+          curl -fsS -X POST http://localhost:8080/api/v1/vehiculos -H 'Content-Type: application/json' \
+            -d '{"patente":"K8S001","marca":"Kia","modelo":"Rio","anio":2023,"color":"Blanco","tipo":"Hatchback","disponible":true}'
+          curl -fsS http://localhost:8080/api/v1/vehiculos | grep -q K8S001
+          echo "Pruebas de humo en Kubernetes OK"
+
+      - name: Estado del despliegue
+        if: always()
+        run: |
+          kubectl -n vehiculos get all,hpa,pdb,networkpolicy
+          kubectl -n vehiculos rollout history deployment/ms-vehiculos
+          {
+            echo "## Despliegue en produccion (Kubernetes)"
+            echo "- Imagen: \`$IMAGE\`"
+            echo "- Digest: \`${{ needs.docker.outputs.digest }}\`"
+            echo '```'
+            kubectl -n vehiculos get deploy,pods,hpa -o wide
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostico en caso de fallo
+        if: failure()
+        run: |
+          kubectl -n vehiculos describe pods
+          kubectl -n vehiculos logs deployment/ms-vehiculos --all-containers --tail=200 || true
+          kubectl -n vehiculos get events --sort-by=.lastTimestamp
+
+  # ---------------------------------------------------------------------------
+  # Alerta: si cualquier etapa falla en main, se abre un issue automaticamente
+  # ---------------------------------------------------------------------------
+  alert:
+    name: Alerta de fallo
+    needs: [test, security, docker, deploy-staging, deploy-production]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const failed = Object.entries(${{ toJSON(needs) }})
+              .filter(([, j]) => j.result === 'failure')
+              .map(([name]) => `- \`${name}\``)
+              .join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Pipeline fallido en ${context.sha.substring(0, 7)}`,
+              body: `El pipeline CI/CD fallo y el despliegue fue bloqueado.\n\n**Etapas fallidas:**\n${failed}\n\n**Commit:** ${context.sha}\n**Autor:** @${context.actor}\n**Ejecucion:** ${run}`,
+              labels: ['pipeline-failure']
+            });

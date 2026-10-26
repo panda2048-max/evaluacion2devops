@@ -1,0 +1,74 @@
+# Entorno simulado: microservicio + MySQL.
+# Uso local:   cp .env.example .env && docker compose up -d --build
+# Uso en CI:   IMAGE=ghcr.io/<owner>/ms-vehiculos:<sha> docker compose up -d --no-build
+name: ms-vehiculos
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: vehiculos
+      MYSQL_USER: ${DB_USERNAME:?definir DB_USERNAME en .env}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?definir DB_PASSWORD en .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?definir DB_ROOT_PASSWORD en .env}
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - backend
+    # La BD no se publica al host: solo la app la alcanza por la red interna
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  app:
+    image: ${IMAGE:-ms-vehiculos:local}
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:mysql://db:3306/vehiculos?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      SERVER_PORT: 9004
+    ports:
+      - "${APP_PORT:-9004}:9004"
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9004/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+networks:
+  backend:
+
+volumes:
+  db-data:

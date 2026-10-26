@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: ms-vehiculos
+  # Las credenciales NO se versionan: llegan por variables de entorno
+  # (.env en Docker Compose, Secret en Kubernetes, secrets en GitHub Actions).
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/vehiculos?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:vehiculos}
+    password: ${DB_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: ${SHOW_SQL:false}
+
+server:
+  port: ${SERVER_PORT:9004}
+  shutdown: graceful
+
+# Solo se exponen los endpoints necesarios para health checks y probes
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true

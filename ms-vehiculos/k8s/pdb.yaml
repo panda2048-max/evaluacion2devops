@@ -1,0 +1,10 @@
+# Durante mantenciones del cluster (drain de nodos) siempre queda al menos 1 pod disponible
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ms-vehiculos
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ms-vehiculos

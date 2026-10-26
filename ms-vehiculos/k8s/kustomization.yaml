@@ -1,0 +1,27 @@
+# kubectl apply -k k8s/
+# El Secret "vehiculos-db" NO se versiona: se crea aparte (ver README / pipeline).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vehiculos
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - mysql.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: ms-vehiculos
+      app.kubernetes.io/managed-by: kustomize
+
+# El pipeline reemplaza esta imagen por ghcr.io/<owner>/ms-vehiculos:<sha-del-commit>
+images:
+  - name: ms-vehiculos
+    newName: ms-vehiculos
+    newTag: latest

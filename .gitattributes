@@ -1,0 +1,3 @@
+# Scripts que se ejecutan en Linux (CI y contenedor) deben conservar fin de linea LF
+*.sh text eol=lf
+mvnw text eol=lf
