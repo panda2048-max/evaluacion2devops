@@ -7,7 +7,7 @@ Pipeline CI/CD en **GitHub Actions** que automatiza el ciclo de vida completo de
 contenerización, publicación de la imagen y despliegue automático en dos entornos simulados
 (Docker Compose y Kubernetes).
 
-**Integrantes:** _<nombre 1>_ · _<nombre 2>_
+**Integrantes:** _<Fabrizio Morales>_ · _<Tomas Huiriqueo>_
 
 ---
 
@@ -180,8 +180,8 @@ Cita según <https://bibliotecas.duoc.cl/ia>: _completar con el formato de la bi
 
 > ✍️ **Obligatorio, redactado por cada integrante sin apoyo de IA.**
 
-### Reflexión de _<integrante 1>_
+### Reflexión de _<Fabrizio Morales>_
 _…aprendizaje y contribución al proyecto…_
 
-### Reflexión de _<integrante 2>_
+### Reflexión de _<Tomas Huiriqueo>_
 _…aprendizaje y contribución al proyecto…_
