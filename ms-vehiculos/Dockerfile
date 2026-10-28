@@ -11,7 +11,7 @@ COPY mvnw pom.xml ./
 RUN chmod +x mvnw && ./mvnw -B -q dependency:go-offline
 
 COPY src/ src/
-# Los tests ya corren en el job de CI; aqui solo se empaqueta
+# Solo se empaqueta: las pruebas unitarias se ejecutan aparte con ./mvnw verify
 RUN ./mvnw -B -q package -DskipTests \
     && java -Djarmode=tools -jar target/*.jar extract --layers --launcher --destination extracted
 

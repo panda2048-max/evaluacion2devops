@@ -3,7 +3,7 @@
 [![CI/CD ms-vehiculos](https://github.com/panda2048-max/evaluacion2devops/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/panda2048-max/evaluacion2devops/actions/workflows/ci-cd.yml)
 
 Pipeline CI/CD en **GitHub Actions** que automatiza el ciclo de vida completo del microservicio
-`ms-vehiculos` (Spring Boot 4 · Java 21 · MySQL): pruebas automatizadas, análisis de seguridad,
+`ms-vehiculos` (Spring Boot 4 · Java 21 · MySQL): análisis de seguridad,
 contenerización, publicación de la imagen y despliegue automático en dos entornos simulados
 (Docker Compose y Kubernetes).
 
@@ -30,39 +30,39 @@ ms-vehiculos/
 │   ├── pdb.yaml               PodDisruptionBudget (mínimo 1 pod disponible)
 │   └── networkpolicy.yaml     MySQL solo accesible desde la app
 ├── pom.xml                    Build Maven + JaCoCo con umbral de cobertura
-└── src/                       Código y pruebas
+└── src/                       Código y pruebas unitarias (se ejecutan localmente, fuera del pipeline)
 ```
 
 ## 2. Flujo del pipeline
 
 ```mermaid
 flowchart LR
-    A[push / PR a main] --> B[1. Tests + cobertura<br/>JUnit · Mockito · MockMvc · JaCoCo ≥80%]
-    B --> C[2. Seguridad<br/>Snyk Open Source + Snyk Code]
-    C --> D[3. Imagen Docker<br/>build + Snyk Container]
+    A[push / PR a main] --> C[1. Seguridad<br/>Snyk Open Source + Snyk Code]
+    C --> D[2. Imagen Docker<br/>build + Snyk Container]
     D -->|solo main| E[Push a GHCR<br/>tag sha-xxxxxxx]
-    E --> F[4. Deploy staging<br/>Docker Compose + smoke tests]
-    F --> G[5. Deploy producción<br/>Kubernetes kind + smoke tests]
-    B -. falla .-> X[Alerta: issue automático]
-    C -. falla .-> X
+    E --> F[3. Deploy staging<br/>Docker Compose + smoke tests]
+    F --> G[4. Deploy producción<br/>Kubernetes kind + smoke tests]
+    C -. falla .-> X[Alerta: issue automático]
     D -. falla .-> X
     F -. falla .-> X
     G -. falla .-> X
 ```
 
 Cada etapa depende de la anterior (`needs`): **si una etapa falla, las siguientes no se ejecutan**,
-por lo que código sin pruebas, con vulnerabilidades o que no arranca nunca llega a desplegarse.
+por lo que código con vulnerabilidades o que no arranca nunca llega a desplegarse.
 
 | # | Job | Qué hace | Bloquea si… |
 |---|-----|----------|-------------|
-| 1 | Tests y cobertura | `./mvnw verify`: compila, ejecuta 18 pruebas (servicio + controller), genera reporte JaCoCo | falla alguna prueba o la cobertura de líneas es < 80 % |
-| 2 | Seguridad (Snyk) | `snyk test` (dependencias), `snyk code test` (código fuente), sube SARIF a *Security*, `snyk monitor` | hay vulnerabilidades **high** o **critical** |
-| 3 | Imagen Docker | Construye la imagen, la escanea con `snyk container test` y la publica en GHCR | la imagen tiene vulnerabilidades **critical** |
-| 4 | Deploy staging | `docker compose up --wait` con la imagen recién publicada + pruebas de humo (health, POST, GET, 404) | algún contenedor no queda *healthy* o falla una prueba de humo |
-| 5 | Deploy producción | Crea un cluster Kubernetes (kind), aplica los manifiestos, espera el rollout + pruebas de humo | el rollout no termina o fallan las pruebas de humo |
+| 1 | Seguridad (Snyk) | `snyk test` (dependencias), `snyk code test` (código fuente), sube SARIF a *Security*, `snyk monitor` | hay vulnerabilidades **high** o **critical** |
+| 2 | Imagen Docker | Construye la imagen, la escanea con `snyk container test` y la publica en GHCR | la imagen tiene vulnerabilidades **critical** |
+| 3 | Deploy staging | `docker compose up --wait` con la imagen recién publicada + pruebas de humo (health, POST, GET, 404) | algún contenedor no queda *healthy* o falla una prueba de humo |
+| 4 | Deploy producción | Crea un cluster Kubernetes (kind), aplica los manifiestos, espera el rollout + pruebas de humo | el rollout no termina o fallan las pruebas de humo |
 | — | Alerta de fallo | Abre un *issue* con las etapas fallidas, el commit y el enlace a la ejecución | — |
 
-En los **Pull Requests** se ejecutan las etapas 1–3 (sin publicar ni desplegar), de modo que se
+> Las pruebas unitarias (JUnit/Mockito/MockMvc) se mantienen en el proyecto, pero **no se ejecutan
+> en el pipeline**; se corren localmente con `./mvnw verify` (ver sección 8).
+
+En los **Pull Requests** se ejecutan las etapas 1–2 (sin publicar ni desplegar), de modo que se
 valida el cambio antes de mezclarlo en `main`.
 
 ## 3. Contenedores (Dockerfile)
@@ -103,16 +103,15 @@ valida el cambio antes de mezclarlo en `main`.
 | ¿Qué imagen exacta se desplegó? | El **digest** inmutable se registra en el resumen de la ejecución (*Job summary*) |
 | ¿Qué ejecución del pipeline hizo el despliegue? | Anotación `kubernetes.io/change-cause` del Deployment (commit + URL de la ejecución); `kubectl rollout history` |
 | ¿Cuándo y en qué entorno? | Pestaña **Deployments / Environments** de GitHub (`staging`, `production`) |
-| ¿Pasó las pruebas y el análisis? | Artefacto `reportes-calidad-<sha>` (Surefire + JaCoCo, 30 días), resumen de cobertura, resultados de Snyk en **Security → Code scanning** |
+| ¿Pasó el análisis de seguridad? | Resultados de Snyk en **Security → Code scanning** y proyecto monitoreado en Snyk |
 | ¿Qué falló y quién lo provocó? | Issue automático con etiqueta `pipeline-failure`, commit, autor y enlace al log |
 
 ## 6. Calidad y seguridad
 
 **Políticas de calidad**
-- Toda la lógica de negocio (`VehiculoService`) y la API REST (`VehiculoController`) tienen pruebas:
-  casos felices, 404 (no existe), 409 (patente duplicada) y 400 (validación de entrada).
-- Cobertura mínima de líneas: **80 %** (regla `jacoco:check`); si baja, el build falla.
-- Pruebas de humo contra la aplicación **desplegada** en ambos entornos.
+- Pruebas de humo contra la aplicación **desplegada** en ambos entornos (health, alta, consulta y 404).
+- El proyecto conserva pruebas unitarias de `VehiculoService` y `VehiculoController` con cobertura
+  mínima de 80 % (`jacoco:check`), ejecutables localmente con `./mvnw verify` (fuera del pipeline).
 
 **Políticas de seguridad**
 - Dependencias y código analizados con Snyk; umbral `high` → bloqueo del pipeline.
@@ -131,7 +130,7 @@ valida el cambio antes de mezclarlo en `main`.
 3. (Opcional) **Aprobación manual para producción**: *Settings → Environments → production →
    Required reviewers*. Así el despliegue a producción espera la aprobación de un integrante.
 4. (Opcional) **Proteger `main`**: *Settings → Branches → Add rule* exigiendo que pasen los checks
-   `1. Tests y cobertura`, `2. Seguridad (Snyk)` y `3. Imagen Docker` antes de mezclar un PR.
+   `1. Seguridad (Snyk)` y `2. Imagen Docker` antes de mezclar un PR.
 
 ## 8. Ejecución local
 
@@ -163,7 +162,7 @@ kubectl -n vehiculos port-forward svc/ms-vehiculos 8080:80
 ## 9. Justificación de decisiones técnicas
 
 > ✍️ **Sección a redactar por el equipo, sin IA** (requisito de la evaluación).
-> Sugerencias: por qué Snyk y esos umbrales de severidad, por qué 80 % de cobertura,
+> Sugerencias: por qué Snyk y esos umbrales de severidad,
 > por qué Compose para staging y Kubernetes para producción, por qué esos valores de HPA y límites.
 
 ## 10. Uso de Inteligencia Artificial
