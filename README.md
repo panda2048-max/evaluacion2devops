@@ -114,9 +114,11 @@ valida el cambio antes de mezclarlo en `main`.
   mínima de 80 % (`jacoco:check`), ejecutables localmente con `./mvnw verify` (fuera del pipeline).
 
 **Políticas de seguridad**
-- Código analizado con SonarQube Cloud usando el Quality Gate *Sonar way*; si no se cumple
-  (`sonar.qualitygate.wait=true`) → bloqueo del pipeline. Como las pruebas no corren en el
-  pipeline, la cobertura se excluye del análisis (`sonar.coverage.exclusions`).
+- Código analizado con SonarQube Cloud usando el Quality Gate *Sonar way*. El paso
+  *Verificar Quality Gate* consulta el resultado por API: `ERROR` → bloqueo del pipeline,
+  `OK` → continúa, `NONE` (primer análisis, sin línea base de código nuevo) → continúa con
+  advertencia. Como las pruebas no corren en el pipeline, la cobertura se excluye del análisis
+  (`sonar.coverage.exclusions`).
 - Dependencias escaneadas con OSV-Scanner contra la base de datos OSV; cualquier vulnerabilidad
   conocida → bloqueo. Las excepciones justificadas se registran en `ms-vehiculos/osv-scanner.toml`
   con fecha de expiración.
