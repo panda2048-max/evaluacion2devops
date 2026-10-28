@@ -23,25 +23,28 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1. Seguridad: dependencias (SCA) y codigo fuente (SAST) con Snyk.
-  #    Si se encuentran vulnerabilidades de severidad alta o critica el job falla
-  #    y BLOQUEA la construccion/publicacion de la imagen y el despliegue.
+  # 1. Seguridad: analisis de codigo con SonarQube Cloud (Quality Gate) y
+  #    escaneo de dependencias con OSV-Scanner. Si el Quality Gate falla o hay
+  #    dependencias vulnerables, el job falla y BLOQUEA la imagen y el despliegue.
   #    (Las pruebas unitarias siguen en el proyecto y se ejecutan con ./mvnw verify,
   #    pero no forman parte del pipeline.)
   # ---------------------------------------------------------------------------
   security:
-    name: 1. Seguridad (Snyk)
+    name: 1. Seguridad (SonarQube + dependencias)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write   # publicar resultados en la pestana Security (SARIF)
     defaults:
       run:
         working-directory: ${{ env.APP_DIR }}
     env:
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION || github.repository_owner }}
+      SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY || format('{0}_{1}', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # SonarQube usa el historial git para detectar el "codigo nuevo"
 
       - uses: actions/setup-java@v4
         with:
@@ -49,40 +52,53 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
 
-      - uses: snyk/actions/setup@master
+      - name: Cache de SonarQube
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
 
-      - name: Verificar que existe el secret SNYK_TOKEN
+      - name: Verificar que existe el secret SONAR_TOKEN
         run: |
-          if [ -z "$SNYK_TOKEN" ]; then
-            echo "::error::Falta el secret SNYK_TOKEN (Settings > Secrets and variables > Actions)"
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::Falta el secret SONAR_TOKEN (Settings > Secrets and variables > Actions)"
             exit 1
           fi
 
-      - name: Escaneo de dependencias (Snyk Open Source)
-        id: sca
-        run: snyk test --file=pom.xml --severity-threshold=high --sarif-file-output=snyk-deps.sarif
+      # Compila (sin ejecutar pruebas) y envia el analisis a SonarQube Cloud.
+      # qualitygate.wait=true hace que el paso FALLE si el Quality Gate no se cumple.
+      # Como las pruebas no corren en el pipeline, la cobertura se excluye del analisis.
+      - name: Analisis de codigo (SonarQube Cloud)
+        run: |
+          chmod +x mvnw
+          ./mvnw -B test-compile org.sonarsource.scanner.maven:sonar-maven-plugin:5.1.0.4751:sonar \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.organization="$SONAR_ORGANIZATION" \
+            -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+            -Dsonar.projectName=ms-vehiculos \
+            -Dsonar.coverage.exclusions="**/*" \
+            -Dsonar.qualitygate.wait=true \
+            -Dsonar.qualitygate.timeout=300
 
-      - name: Analisis estatico de codigo (Snyk Code)
-        id: sast
-        if: always() && steps.sca.outcome != 'skipped'
-        run: snyk code test --severity-threshold=high --sarif-file-output=snyk-code.sarif
-
-      - name: Subir resultados a GitHub Security
+      - name: Enlace al reporte de SonarQube
         if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: ${{ env.APP_DIR }}
-          category: snyk
+        run: |
+          echo "## Analisis de codigo" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Reporte: https://sonarcloud.io/summary/overall?id=${SONAR_PROJECT_KEY}" >> "$GITHUB_STEP_SUMMARY"
 
-      # Alertas continuas: Snyk vuelve a revisar el proyecto y avisa por correo
-      # cuando se publica una vulnerabilidad nueva en alguna dependencia.
-      - name: Registrar proyecto en Snyk para monitoreo continuo
-        if: success() && github.event_name == 'push'
-        run: snyk monitor --file=pom.xml --project-name=ms-vehiculos --target-reference=${{ github.sha }}
+      # Escaneo de dependencias (incluye transitivas) contra la base de datos OSV.
+      # Falla si encuentra vulnerabilidades conocidas; las excepciones justificadas
+      # se documentan en ms-vehiculos/osv-scanner.toml.
+      - name: Escaneo de dependencias (OSV-Scanner)
+        uses: google/osv-scanner-action/osv-scanner-action@v2.7.0
+        with:
+          scan-args: |-
+            --config=./ms-vehiculos/osv-scanner.toml
+            --recursive
+            ./ms-vehiculos
 
   # ---------------------------------------------------------------------------
-  # 2. Contenedor: build de la imagen, escaneo de la imagen y publicacion en GHCR
+  # 2. Contenedor: build de la imagen y publicacion en GHCR
   # ---------------------------------------------------------------------------
   docker:
     name: 2. Imagen Docker
@@ -94,8 +110,6 @@ jobs:
     outputs:
       image: ${{ env.IMAGE_NAME }}:sha-${{ steps.vars.outputs.short_sha }}
       digest: ${{ steps.push.outputs.digest }}
-    env:
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -123,14 +137,6 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - uses: snyk/actions/setup@master
-
-      # Bloqueo: una vulnerabilidad critica en la imagen (SO base o JRE) detiene el pipeline
-      - name: Escaneo de la imagen (Snyk Container)
-        run: |
-          snyk container test "${IMAGE_NAME}:sha-${{ steps.vars.outputs.short_sha }}" \
-            --file=${APP_DIR}/Dockerfile --severity-threshold=critical
 
       - name: Login en GitHub Container Registry
         if: github.event_name != 'pull_request'

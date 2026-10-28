@@ -37,8 +37,8 @@ ms-vehiculos/
 
 ```mermaid
 flowchart LR
-    A[push / PR a main] --> C[1. Seguridad<br/>Snyk Open Source + Snyk Code]
-    C --> D[2. Imagen Docker<br/>build + Snyk Container]
+    A[push / PR a main] --> C[1. Seguridad<br/>SonarQube Cloud Quality Gate + OSV-Scanner]
+    C --> D[2. Imagen Docker<br/>build multi-stage]
     D -->|solo main| E[Push a GHCR<br/>tag sha-xxxxxxx]
     E --> F[3. Deploy staging<br/>Docker Compose + smoke tests]
     F --> G[4. Deploy producción<br/>Kubernetes kind + smoke tests]
@@ -53,8 +53,8 @@ por lo que código con vulnerabilidades o que no arranca nunca llega a desplegar
 
 | # | Job | Qué hace | Bloquea si… |
 |---|-----|----------|-------------|
-| 1 | Seguridad (Snyk) | `snyk test` (dependencias), `snyk code test` (código fuente), sube SARIF a *Security*, `snyk monitor` | hay vulnerabilidades **high** o **critical** |
-| 2 | Imagen Docker | Construye la imagen, la escanea con `snyk container test` y la publica en GHCR | la imagen tiene vulnerabilidades **critical** |
+| 1 | Seguridad (SonarQube + dependencias) | Análisis estático del código en **SonarQube Cloud** (bugs, vulnerabilidades, *security hotspots*, *code smells*, duplicación) y escaneo de dependencias directas y transitivas con **OSV-Scanner** | el **Quality Gate** de SonarQube no se cumple o hay dependencias con vulnerabilidades conocidas |
+| 2 | Imagen Docker | Construye la imagen multi-stage y la publica en GHCR | la imagen no compila |
 | 3 | Deploy staging | `docker compose up --wait` con la imagen recién publicada + pruebas de humo (health, POST, GET, 404) | algún contenedor no queda *healthy* o falla una prueba de humo |
 | 4 | Deploy producción | Crea un cluster Kubernetes (kind), aplica los manifiestos, espera el rollout + pruebas de humo | el rollout no termina o fallan las pruebas de humo |
 | — | Alerta de fallo | Abre un *issue* con las etapas fallidas, el commit y el enlace a la ejecución | — |
@@ -103,7 +103,7 @@ valida el cambio antes de mezclarlo en `main`.
 | ¿Qué imagen exacta se desplegó? | El **digest** inmutable se registra en el resumen de la ejecución (*Job summary*) |
 | ¿Qué ejecución del pipeline hizo el despliegue? | Anotación `kubernetes.io/change-cause` del Deployment (commit + URL de la ejecución); `kubectl rollout history` |
 | ¿Cuándo y en qué entorno? | Pestaña **Deployments / Environments** de GitHub (`staging`, `production`) |
-| ¿Pasó el análisis de seguridad? | Resultados de Snyk en **Security → Code scanning** y proyecto monitoreado en Snyk |
+| ¿Pasó el análisis de seguridad? | Dashboard del proyecto en SonarQube Cloud (historial de análisis por commit, enlazado en el *Job summary*) y log del paso OSV-Scanner |
 | ¿Qué falló y quién lo provocó? | Issue automático con etiqueta `pipeline-failure`, commit, autor y enlace al log |
 
 ## 6. Calidad y seguridad
@@ -114,9 +114,14 @@ valida el cambio antes de mezclarlo en `main`.
   mínima de 80 % (`jacoco:check`), ejecutables localmente con `./mvnw verify` (fuera del pipeline).
 
 **Políticas de seguridad**
-- Dependencias y código analizados con Snyk; umbral `high` → bloqueo del pipeline.
-- Imagen escaneada con Snyk Container; umbral `critical` → bloqueo.
-- `snyk monitor` registra cada versión de `main` para recibir **alertas por correo** ante nuevas vulnerabilidades.
+- Código analizado con SonarQube Cloud usando el Quality Gate *Sonar way*; si no se cumple
+  (`sonar.qualitygate.wait=true`) → bloqueo del pipeline. Como las pruebas no corren en el
+  pipeline, la cobertura se excluye del análisis (`sonar.coverage.exclusions`).
+- Dependencias escaneadas con OSV-Scanner contra la base de datos OSV; cualquier vulnerabilidad
+  conocida → bloqueo. Las excepciones justificadas se registran en `ms-vehiculos/osv-scanner.toml`
+  con fecha de expiración.
+- SonarQube Cloud envía **notificaciones por correo** cuando el Quality Gate falla (configurable
+  en *My Account → Notifications*), además del issue automático que crea el pipeline.
 - Sin credenciales en el repositorio: se eliminaron la IP y la contraseña que estaban por defecto en
   `application.yml`; se usan `.env`, `Secret` de Kubernetes y *GitHub Secrets*.
 - Actuator expone solo `health` e `info`.
@@ -124,13 +129,19 @@ valida el cambio antes de mezclarlo en `main`.
 
 ## 7. Configuración necesaria en GitHub
 
-1. **Secret `SNYK_TOKEN`**: en <https://app.snyk.io> → *Account settings* → *Auth Token*.
-   Copiarlo en *Settings → Secrets and variables → Actions → New repository secret*.
-2. **Habilitar Snyk Code** en Snyk: *Settings → Snyk Code → Enable*.
-3. (Opcional) **Aprobación manual para producción**: *Settings → Environments → production →
+1. **Crear el proyecto en SonarQube Cloud**: entrar a <https://sonarcloud.io> con la cuenta de
+   GitHub → *+ → Analyze new project* → importar `evaluacion2devops`.
+2. **Desactivar el análisis automático**: en el proyecto, *Administration → Analysis Method →
+   Automatic Analysis: OFF* (el análisis lo hace el pipeline; si queda activo, el paso falla).
+3. **Secret `SONAR_TOKEN`**: en SonarQube Cloud, *My Account → Security → Generate Token*.
+   Copiarlo en GitHub: *Settings → Secrets and variables → Actions → New repository secret*.
+4. **Variables `SONAR_ORGANIZATION` y `SONAR_PROJECT_KEY`** (pestaña *Variables* de la misma
+   pantalla), con los valores que muestra SonarQube Cloud en *Information* del proyecto.
+   Si no se definen, el pipeline usa `panda2048-max` y `panda2048-max_evaluacion2devops`.
+5. (Opcional) **Aprobación manual para producción**: *Settings → Environments → production →
    Required reviewers*. Así el despliegue a producción espera la aprobación de un integrante.
-4. (Opcional) **Proteger `main`**: *Settings → Branches → Add rule* exigiendo que pasen los checks
-   `1. Seguridad (Snyk)` y `2. Imagen Docker` antes de mezclar un PR.
+6. (Opcional) **Proteger `main`**: *Settings → Branches → Add rule* exigiendo que pasen los checks
+   `1. Seguridad (SonarQube + dependencias)` y `2. Imagen Docker` antes de mezclar un PR.
 
 ## 8. Ejecución local
 
@@ -161,17 +172,11 @@ kubectl -n vehiculos port-forward svc/ms-vehiculos 8080:80
 
 ## 9. Justificación de decisiones técnicas
 
-> ✍️ **Sección a redactar por el equipo, sin IA** (requisito de la evaluación).
-> Sugerencias: por qué Snyk y esos umbrales de severidad,
-> por qué Compose para staging y Kubernetes para producción, por qué esos valores de HPA y límites.
+> A traves de Las practicas realizadas se prefirio ocupar Sonarqube Por mas faciliar y experiencia en el manejo de la herramienta
 
 ## 10. Uso de Inteligencia Artificial
 
-> ✍️ Completar y revisar por el equipo. Ejemplo de declaración:
-
-| Herramienta | Uso | Validación realizada por el equipo |
-|---|---|---|
-| Claude Code (Anthropic, modelo Claude Opus 5.5) | Apoyo en la generación inicial de Dockerfile, docker-compose, manifiestos Kubernetes, workflow de GitHub Actions, pruebas del controller y estructura de este README |Revision de contenido de readme,configuracion de Snyk,revision de workflows|
+> su ocupo Claude Code para la configuracion correcta del workflows y resolver dudas en momentos de fallos en el codigo
 
 Cita según <https://bibliotecas.duoc.cl/ia>: _completar con el formato de la biblioteca_.
 
@@ -180,7 +185,8 @@ Cita según <https://bibliotecas.duoc.cl/ia>: _completar con el formato de la bi
 > ✍️ **Obligatorio, redactado por cada integrante sin apoyo de IA.**
 
 ### Reflexión de _<Fabrizio Morales>_
-_…aprendizaje y contribución al proyecto…_
+> como reflexion la manera que al diseñar bien un workflows con las herramientas como sonarQube.
+>Ayudan realmente a facilitar el trabajo ya que terminamos automatizando todo y creando un metodo de informacion de errores por si ocuprre una falla
 
 ### Reflexión de _<Tomas Huiriqueo>_
 _…aprendizaje y contribución al proyecto…_

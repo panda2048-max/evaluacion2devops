@@ -1,0 +1,8 @@
+# Excepciones del escaneo de dependencias (OSV-Scanner).
+# Solo agregar una vulnerabilidad aqui si se justifica por que no aplica al
+# microservicio y con fecha de expiracion, para revisarla de nuevo.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2026-12-31
+# reason = "Explicar por que no afecta a ms-vehiculos"
