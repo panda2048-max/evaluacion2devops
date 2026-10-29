@@ -198,7 +198,7 @@ kubectl -n vehiculos port-forward svc/ms-vehiculos 8080:80
 
 ## 9. Justificación de decisiones técnicas
 
-> A traves de Las practicas realizadas se prefirio ocupar Sonarqube Por mas faciliar y experiencia en el manejo de la herramienta
+> A traves de Las practicas realizadas se prefirio ocupar Sonarqube Por mas faciliar y experiencia en el manejo de la herramienta, aparte añadimos a traves del workflow una automatizacion en ec2 
 
 ## 10. Uso de Inteligencia Artificial
 
