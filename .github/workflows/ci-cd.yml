@@ -364,7 +364,8 @@ jobs:
       url: http://${{ vars.EC2_HOST }}:9004/swagger-ui.html
     env:
       IMAGE: ${{ needs.docker.outputs.image }}
-      EC2_HOST: ${{ vars.EC2_HOST }}
+      # Se acepta EC2_HOST definida como variable o como secret
+      EC2_HOST: ${{ vars.EC2_HOST || secrets.EC2_HOST }}
       EC2_USER: ${{ vars.EC2_USER || 'ubuntu' }}
       REMOTE_DIR: ms-vehiculos
       COMPOSE: docker compose -f docker-compose.yml -f docker-compose.aws.yml
@@ -375,8 +376,12 @@ jobs:
         env:
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
-          if [ -z "$EC2_HOST" ] || [ -z "$EC2_SSH_KEY" ]; then
-            echo "::error::Faltan la variable EC2_HOST o el secret EC2_SSH_KEY (Settings > Secrets and variables > Actions)"
+          if [ -z "$EC2_HOST" ]; then
+            echo "::error::Falta EC2_HOST (Settings > Secrets and variables > Actions > Variables)"
+            exit 1
+          fi
+          if [ -z "$EC2_SSH_KEY" ]; then
+            echo "::error::Falta el secret EC2_SSH_KEY (Settings > Secrets and variables > Actions > Secrets)"
             exit 1
           fi
           mkdir -p ~/.ssh
