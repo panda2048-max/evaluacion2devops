@@ -208,11 +208,9 @@ Cita según <https://bibliotecas.duoc.cl/ia>: _completar con el formato de la bi
 
 ## 11. Conclusiones y reflexiones individuales
 
-> ✍️ **Obligatorio, redactado por cada integrante sin apoyo de IA.**
-
 ### Reflexión de Fabrizio Morales
 > como reflexion la manera que al diseñar bien un workflows con las herramientas como sonarQube.
 >Ayudan realmente a facilitar el trabajo ya que terminamos automatizando todo y creando un metodo de informacion de errores por si ocuprre una falla
 
 ### Reflexión de Tomas Huiriqueo
-_…aprendizaje y contribución al proyecto…_
+> devops es muy importante a la hora de la verdad gracias al ayudar con la automaticacion de todos estos procesos y mas con el metodo de informacion de errores.
