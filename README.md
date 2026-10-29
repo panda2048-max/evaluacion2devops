@@ -5,7 +5,7 @@
 Pipeline CI/CD en **GitHub Actions** que automatiza el ciclo de vida completo del microservicio
 `ms-vehiculos` (Spring Boot 4 · Java 21 · MySQL): análisis de seguridad,
 contenerización, publicación de la imagen y despliegue automático en dos entornos simulados
-(Docker Compose y Kubernetes).
+(Docker Compose y Kubernetes) y en una instancia **AWS EC2**.
 
 **Integrantes:** _<Fabrizio Morales>_ · _<Tomas Huiriqueo>_
 
@@ -19,6 +19,7 @@ ms-vehiculos/
 ├── Dockerfile                 Imagen multi-stage, usuario no-root, healthcheck
 ├── .dockerignore
 ├── docker-compose.yml         Entorno "staging": app + MySQL
+├── docker-compose.aws.yml     Ajustes de memoria para la instancia AWS EC2 (~1 GB RAM)
 ├── .env.example               Plantilla de variables (el .env real no se versiona)
 ├── k8s/                       Entorno "producción": manifiestos Kubernetes (kustomize)
 │   ├── namespace.yaml         Namespace con Pod Security "restricted"
@@ -42,10 +43,12 @@ flowchart LR
     D -->|solo main| E[Push a GHCR<br/>tag sha-xxxxxxx]
     E --> F[3. Deploy staging<br/>Docker Compose + smoke tests]
     F --> G[4. Deploy producción<br/>Kubernetes kind + smoke tests]
+    G --> H[5. Deploy AWS EC2<br/>SSH + Docker Compose + smoke tests]
     C -. falla .-> X[Alerta: issue automático]
     D -. falla .-> X
     F -. falla .-> X
     G -. falla .-> X
+    H -. falla .-> X
 ```
 
 Cada etapa depende de la anterior (`needs`): **si una etapa falla, las siguientes no se ejecutan**,
@@ -57,6 +60,7 @@ por lo que código con vulnerabilidades o que no arranca nunca llega a desplegar
 | 2 | Imagen Docker | Construye la imagen multi-stage y la publica en GHCR | la imagen no compila |
 | 3 | Deploy staging | `docker compose up --wait` con la imagen recién publicada + pruebas de humo (health, POST, GET, 404) | algún contenedor no queda *healthy* o falla una prueba de humo |
 | 4 | Deploy producción | Crea un cluster Kubernetes (kind), aplica los manifiestos, espera el rollout + pruebas de humo | el rollout no termina o fallan las pruebas de humo |
+| 5 | Deploy AWS EC2 | Se conecta por SSH a la instancia, copia los `docker-compose`, descarga desde GHCR la imagen del commit y la levanta con `docker compose up --wait` + pruebas de humo | algún contenedor no queda *healthy* o fallan las pruebas de humo |
 | — | Alerta de fallo | Abre un *issue* con las etapas fallidas, el commit y el enlace a la ejecución | — |
 
 > Las pruebas unitarias (JUnit/Mockito/MockMvc) se mantienen en el proyecto, pero **no se ejecutan
@@ -95,6 +99,19 @@ valida el cambio antes de mezclarlo en `main`.
 | Persistencia | MySQL como `StatefulSet` con `PersistentVolumeClaim` |
 | Rollback | `revisionHistoryLimit: 5` + anotación `change-cause` → `kubectl rollout undo` |
 
+### AWS EC2 (nube)
+- Instancia Ubuntu con Docker y Docker Compose; el pipeline despliega por SSH la **misma imagen**
+  que ya pasó staging y Kubernetes.
+- `docker-compose.aws.yml` adapta el entorno a una instancia de ~1 GB de RAM: MySQL sin
+  *performance schema* y con buffer pool de 64 MB, JVM con `SerialGC` y límites de memoria
+  (app 450 MB, BD 400 MB). La instancia tiene 1 GB de swap como respaldo.
+- Las credenciales de MySQL se generan una sola vez en el servidor (`~/ms-vehiculos/.env`,
+  permisos `600`) y se conservan entre despliegues; nunca pasan por el repositorio.
+- El login en GHCR usa el token temporal de cada ejecución y se cierra al terminar
+  (`docker logout`); tras cada despliegue se eliminan las imágenes anteriores para no llenar el disco.
+- Cada despliegue queda registrado en `~/ms-vehiculos/deployments.log` (fecha, imagen, commit y run).
+- API pública: `http://<EC2_HOST>:9004/swagger-ui.html`.
+
 ## 5. Trazabilidad: del commit a producción
 
 | Pregunta | Dónde se responde |
@@ -102,14 +119,14 @@ valida el cambio antes de mezclarlo en `main`.
 | ¿Qué commit está desplegado? | Tag de la imagen `sha-<commit>` y etiqueta OCI `org.opencontainers.image.revision` |
 | ¿Qué imagen exacta se desplegó? | El **digest** inmutable se registra en el resumen de la ejecución (*Job summary*) |
 | ¿Qué ejecución del pipeline hizo el despliegue? | Anotación `kubernetes.io/change-cause` del Deployment (commit + URL de la ejecución); `kubectl rollout history` |
-| ¿Cuándo y en qué entorno? | Pestaña **Deployments / Environments** de GitHub (`staging`, `production`) |
+| ¿Cuándo y en qué entorno? | Pestaña **Deployments / Environments** de GitHub (`staging`, `production`, `aws`) y `deployments.log` en la instancia EC2 |
 | ¿Pasó el análisis de seguridad? | Dashboard del proyecto en SonarQube Cloud (historial de análisis por commit, enlazado en el *Job summary*) y log del paso OSV-Scanner |
 | ¿Qué falló y quién lo provocó? | Issue automático con etiqueta `pipeline-failure`, commit, autor y enlace al log |
 
 ## 6. Calidad y seguridad
 
 **Políticas de calidad**
-- Pruebas de humo contra la aplicación **desplegada** en ambos entornos (health, alta, consulta y 404).
+- Pruebas de humo contra la aplicación **desplegada** en cada entorno (health, alta, consulta y 404).
 - El proyecto conserva pruebas unitarias de `VehiculoService` y `VehiculoController` con cobertura
   mínima de 80 % (`jacoco:check`), ejecutables localmente con `./mvnw verify` (fuera del pipeline).
 
@@ -140,9 +157,16 @@ valida el cambio antes de mezclarlo en `main`.
 4. **Variables `SONAR_ORGANIZATION` y `SONAR_PROJECT_KEY`** (pestaña *Variables* de la misma
    pantalla), con los valores que muestra SonarQube Cloud en *Information* del proyecto.
    Si no se definen, el pipeline usa `panda2048-max` y `panda2048-max_evaluacion2devops`.
-5. (Opcional) **Aprobación manual para producción**: *Settings → Environments → production →
-   Required reviewers*. Así el despliegue a producción espera la aprobación de un integrante.
-6. (Opcional) **Proteger `main`**: *Settings → Branches → Add rule* exigiendo que pasen los checks
+5. **Despliegue en AWS EC2**:
+   - Secret `EC2_SSH_KEY`: contenido completo del archivo `.pem` de la instancia.
+   - Variable `EC2_HOST`: IP pública de la instancia. Variable `EC2_USER` (opcional, por defecto `ubuntu`).
+   - **Security Group** de la instancia (*EC2 → Security Groups → Inbound rules*): permitir
+     **TCP 22** (SSH desde GitHub Actions) y **TCP 9004** (acceso a la API) desde `0.0.0.0/0`.
+   - La instancia necesita Docker y Docker Compose (`sudo apt install docker.io docker-compose-v2`
+     y agregar el usuario al grupo `docker`).
+6. (Opcional) **Aprobación manual para producción**: *Settings → Environments → production / aws →
+   Required reviewers*. Así el despliegue espera la aprobación de un integrante.
+7. (Opcional) **Proteger `main`**: *Settings → Branches → Add rule* exigiendo que pasen los checks
    `1. Seguridad (SonarQube + dependencias)` y `2. Imagen Docker` antes de mezclar un PR.
 
 ## 8. Ejecución local
@@ -186,9 +210,9 @@ Cita según <https://bibliotecas.duoc.cl/ia>: _completar con el formato de la bi
 
 > ✍️ **Obligatorio, redactado por cada integrante sin apoyo de IA.**
 
-### Reflexión de _<Fabrizio Morales>_
+### Reflexión de Fabrizio Morales
 > como reflexion la manera que al diseñar bien un workflows con las herramientas como sonarQube.
 >Ayudan realmente a facilitar el trabajo ya que terminamos automatizando todo y creando un metodo de informacion de errores por si ocuprre una falla
 
-### Reflexión de _<Tomas Huiriqueo>_
+### Reflexión de Tomas Huiriqueo
 _…aprendizaje y contribución al proyecto…_

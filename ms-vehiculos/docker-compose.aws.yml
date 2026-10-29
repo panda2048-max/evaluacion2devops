@@ -1,0 +1,30 @@
+# Ajustes para la instancia AWS EC2 (1 vCPU-2 vCPU, ~1 GB de RAM + 2 GB de swap).
+# Se combina con el compose base:
+#   docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d
+services:
+  db:
+    # MySQL por defecto reserva mas memoria de la que tiene la instancia
+    command:
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size=64M
+      - --max-connections=50
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 400M
+
+  app:
+    environment:
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70.0 -XX:+UseSerialGC -Xss512k -XX:+ExitOnOutOfMemoryError"
+    # En una instancia pequena Spring Boot tarda mas en arrancar
+    healthcheck:
+      start_period: 180s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 450M
+        reservations:
+          cpus: "0.25"
+          memory: 200M

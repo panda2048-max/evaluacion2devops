@@ -349,11 +349,111 @@ jobs:
           kubectl -n vehiculos get events --sort-by=.lastTimestamp
 
   # ---------------------------------------------------------------------------
+  # 5. Despliegue automatico en la nube: instancia AWS EC2 con Docker Compose.
+  #    Solo se ejecuta si la misma imagen ya paso staging y Kubernetes.
+  # ---------------------------------------------------------------------------
+  deploy-aws:
+    name: 5. Deploy AWS EC2
+    needs: [docker, deploy-production]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment:
+      name: aws
+      url: http://${{ vars.EC2_HOST }}:9004/swagger-ui.html
+    env:
+      IMAGE: ${{ needs.docker.outputs.image }}
+      EC2_HOST: ${{ vars.EC2_HOST }}
+      EC2_USER: ${{ vars.EC2_USER || 'ubuntu' }}
+      REMOTE_DIR: ms-vehiculos
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.aws.yml
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configurar acceso SSH a la instancia
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          if [ -z "$EC2_HOST" ] || [ -z "$EC2_SSH_KEY" ]; then
+            echo "::error::Faltan la variable EC2_HOST o el secret EC2_SSH_KEY (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "SSH=ssh -i $HOME/.ssh/ec2.pem -o ConnectTimeout=15 $EC2_USER@$EC2_HOST" >> "$GITHUB_ENV"
+
+      - name: Copiar archivos de despliegue
+        run: |
+          $SSH "mkdir -p ~/$REMOTE_DIR"
+          scp -i ~/.ssh/ec2.pem ms-vehiculos/docker-compose.yml ms-vehiculos/docker-compose.aws.yml \
+            "$EC2_USER@$EC2_HOST:~/$REMOTE_DIR/"
+
+      # El .env con las credenciales se genera UNA vez en el servidor y se conserva entre
+      # despliegues (el volumen de MySQL guarda la clave con que se inicializo).
+      # El login en GHCR usa el token temporal de esta ejecucion y se cierra al terminar.
+      - name: Desplegar imagen del commit en la instancia
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $SSH bash -s <<EOF
+          set -e
+          cd ~/$REMOTE_DIR
+          if [ ! -f .env ]; then
+            umask 077
+            printf 'DB_USERNAME=vehiculos\nDB_PASSWORD=%s\nDB_ROOT_PASSWORD=%s\nAPP_PORT=9004\n' \
+              "\$(openssl rand -hex 16)" "\$(openssl rand -hex 16)" > .env
+          fi
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          export IMAGE="$IMAGE"
+          $COMPOSE pull app
+          $COMPOSE up -d --no-build --wait --wait-timeout 420
+          docker logout ghcr.io
+          echo "\$(date -u +%Y-%m-%dT%H:%M:%SZ) $IMAGE ${GITHUB_SHA} run=${GITHUB_RUN_ID}" >> deployments.log
+          docker image prune -af >/dev/null   # disco pequeno: borra imagenes de despliegues anteriores
+          EOF
+
+      - name: Pruebas de humo en la instancia
+        run: |
+          $SSH bash -s <<'EOF'
+          set -e
+          BASE=http://localhost:9004
+          curl -fsS $BASE/actuator/health | grep -q '"UP"'
+          curl -fsS $BASE/api/v1/vehiculos > /dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' $BASE/api/v1/vehiculos/99999)" = "404"
+          echo "Pruebas de humo en AWS OK"
+          EOF
+
+      - name: Verificar acceso publico
+        continue-on-error: true   # depende de que el Security Group permita el puerto 9004
+        run: curl -fsS --max-time 15 "http://$EC2_HOST:9004/actuator/health"
+
+      - name: Estado del despliegue
+        if: always()
+        run: |
+          {
+            echo "## Despliegue en AWS EC2"
+            echo "- Instancia: \`$EC2_HOST\`"
+            echo "- Imagen: \`$IMAGE\`"
+            echo "- Digest: \`${{ needs.docker.outputs.digest }}\`"
+            echo "- Swagger: http://$EC2_HOST:9004/swagger-ui.html"
+            echo '```'
+            $SSH "cd ~/$REMOTE_DIR && $COMPOSE ps && echo && tail -5 deployments.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs en caso de fallo
+        if: failure()
+        run: $SSH "cd ~/$REMOTE_DIR && $COMPOSE logs --no-color --tail=150" || true
+
+  # ---------------------------------------------------------------------------
   # Alerta: si cualquier etapa falla en main, se abre un issue automaticamente
   # ---------------------------------------------------------------------------
   alert:
     name: Alerta de fallo
-    needs: [security, docker, deploy-staging, deploy-production]
+    needs: [security, docker, deploy-staging, deploy-production, deploy-aws]
     if: failure() && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
